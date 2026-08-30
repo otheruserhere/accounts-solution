@@ -1,5 +1,6 @@
 //! A client account and its CSV output row.
 
+use iddqd::{IdOrdItem, id_upcast};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -8,7 +9,7 @@ use crate::operation::ClientId;
 /// A client's account state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
-    client: ClientId,
+    client_id: ClientId,
     available: Decimal,
     held: Decimal,
     locked: bool,
@@ -16,9 +17,9 @@ pub struct Account {
 
 impl Account {
     /// A fresh account with zero balances and unlocked.
-    pub fn new(client: ClientId) -> Self {
+    pub fn new(client_id: ClientId) -> Self {
         Self {
-            client,
+            client_id,
             available: Decimal::ZERO,
             held: Decimal::ZERO,
             locked: false,
@@ -29,6 +30,28 @@ impl Account {
     pub fn total(&self) -> Decimal {
         self.available + self.held
     }
+
+    /// Credit the account, increasing available (and total) funds.
+    pub fn deposit(&mut self, amount: Decimal) {
+        self.available += amount;
+    }
+
+    /// Debit the account, leaving it unchanged if funds are insufficient.
+    pub fn withdraw(&mut self, amount: Decimal) {
+        if self.available >= amount {
+            self.available -= amount;
+        }
+    }
+}
+
+impl IdOrdItem for Account {
+    type Key<'a> = ClientId;
+
+    fn key(&self) -> Self::Key<'_> {
+        self.client_id
+    }
+
+    id_upcast!();
 }
 
 /// The CSV output row for one account: `client, available, held, total, locked`.
@@ -44,7 +67,7 @@ pub struct Record {
 impl From<&Account> for Record {
     fn from(account: &Account) -> Self {
         Self {
-            client: account.client,
+            client: account.client_id,
             available: account.available,
             held: account.held,
             total: account.total(),
@@ -63,9 +86,9 @@ mod tests {
     }
 
     /// Build an account directly from parts for testing serialization.
-    fn account(client: ClientId, available: &str, held: &str, locked: bool) -> Account {
+    fn account(client_id: ClientId, available: &str, held: &str, locked: bool) -> Account {
         Account {
-            client,
+            client_id,
             available: dec(available),
             held: dec(held),
             locked,
@@ -104,5 +127,22 @@ mod tests {
     fn serializes_four_decimal_precision() {
         let account = account(3, "5.1234", "0", false);
         assert_eq!(to_csv(&account), "3,5.1234,0,5.1234,false\n");
+    }
+
+    #[test]
+    fn deposit_then_withdraw() {
+        let mut account = Account::new(1);
+        account.deposit(dec("3.0"));
+        account.withdraw(dec("1.5"));
+        assert_eq!(account.available, dec("1.5"));
+        assert_eq!(account.total(), dec("1.5"));
+    }
+
+    #[test]
+    fn withdraw_with_insufficient_funds_is_ignored() {
+        let mut account = Account::new(1);
+        account.deposit(dec("2.0"));
+        account.withdraw(dec("3.0"));
+        assert_eq!(account.available, dec("2.0"));
     }
 }

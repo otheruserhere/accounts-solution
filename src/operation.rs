@@ -1,8 +1,12 @@
 //! Parsing of a CSV transaction row into a typed [`Operation`].
 
 use eyre::{Result, bail, eyre};
+use iddqd::IdOrdMap;
+use iddqd::id_ord_map::RefMut;
 use rust_decimal::Decimal;
 use serde::Deserialize;
+
+use crate::account::Account;
 
 pub type ClientId = u16;
 pub type TxId = u32;
@@ -81,6 +85,35 @@ impl TryFrom<Record> for Operation {
             RecordType::Chargeback => Ok(Operation::Chargeback { client, tx }),
         }
     }
+}
+
+impl Operation {
+    /// Apply this operation to the account map, creating the account if needed.
+    ///
+    /// Disputes, resolves, and chargebacks are not handled yet.
+    pub fn process(&self, accounts: &mut IdOrdMap<Account>) {
+        match self {
+            Operation::Deposit { client, amount, .. } => {
+                account_mut(accounts, *client).deposit(*amount);
+            }
+            Operation::Withdrawal { client, amount, .. } => {
+                account_mut(accounts, *client).withdraw(*amount);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Get the account for `client`, inserting a fresh one if it does not exist.
+fn account_mut(accounts: &mut IdOrdMap<Account>, client: ClientId) -> RefMut<'_, Account> {
+    if accounts.get(&client).is_none() {
+        accounts
+            .insert_unique(Account::new(client))
+            .expect("account is absent");
+    }
+    accounts
+        .get_mut(&client)
+        .expect("account was just inserted")
 }
 
 /// Validate that a deposit/withdrawal amount is present and non-negative.
