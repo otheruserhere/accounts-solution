@@ -1,0 +1,29 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+
+jobs:
+  build:
+    name: test ${{ matrix.rust }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust:
+          - 1.97
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check
+      - name: Fmt
+        run: cargo fmt --check
+      - name: Run tests
+        run: cargo test -- --nocapture
