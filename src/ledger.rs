@@ -1,5 +1,5 @@
-//! The engine state: client accounts and the transaction store, mutated by
-//! applying [`Operation`]s.
+//! The engine state: client accounts and the deposit store, mutated by applying
+//! [`Operation`]s.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -16,30 +16,30 @@ use crate::transaction::{DisputeState, StoredTx};
 #[derive(Debug)]
 pub struct Ledger {
     accounts: IdOrdMap<Account>,
-    txs: HashMap<TxId, StoredTx>,
+    deposits: HashMap<TxId, StoredTx>,
 }
 
 impl Ledger {
     pub fn new() -> Self {
         Self {
             accounts: IdOrdMap::new(),
-            txs: HashMap::new(),
+            deposits: HashMap::new(),
         }
     }
 
-    /// Apply one operation, mutating account balances and the transaction store.
+    /// Apply one operation, mutating account balances and the deposit store.
     pub fn apply(&mut self, op: Operation) {
         match op {
             Operation::Deposit { client, tx, amount } => {
-                self.account_mut(client).deposit(amount);
-                self.record_tx(client, tx, amount);
-                log::debug!("deposit tx {tx}: client {client} credited {amount}");
+                if self.record_deposit(client, tx, amount) {
+                    self.account_mut(client).deposit(amount);
+                    log::debug!("deposit tx {tx}: client {client} credited {amount}");
+                }
             }
             Operation::Withdrawal { client, tx, amount } => {
                 let result = self.account_mut(client).withdraw(amount);
                 match result {
                     Ok(()) => {
-                        self.record_tx(client, tx, amount);
                         log::debug!("withdrawal tx {tx}: client {client} debited {amount}");
                     }
                     Err(err) => {
@@ -70,23 +70,30 @@ impl Ledger {
             .expect("account was just inserted")
     }
 
-    /// Append a processed transaction, keyed by its globally unique id.
-    fn record_tx(&mut self, client: ClientId, tx: TxId, amount: Decimal) {
-        match self.txs.entry(tx) {
-            Entry::Occupied(_) => log::warn!("duplicate transaction id {tx} for client {client}"),
+    /// Record a deposit for later dispute handling, keyed by its unique tx id.
+    ///
+    /// Returns `false` if the tx id was already seen, so the caller skips
+    /// re-applying a duplicate deposit to the balance.
+    fn record_deposit(&mut self, client: ClientId, tx: TxId, amount: Decimal) -> bool {
+        match self.deposits.entry(tx) {
+            Entry::Occupied(_) => {
+                log::warn!("duplicate transaction id {tx} for client {client}");
+                false
+            }
             Entry::Vacant(entry) => {
                 entry.insert(StoredTx {
                     client,
                     amount,
                     state: DisputeState::Undisputed,
                 });
+                true
             }
         }
     }
 
     /// Hold the disputed funds: available decreases, held increases, total same.
     fn dispute(&mut self, client: ClientId, tx: TxId) {
-        let Some(stored) = owned_tx(&mut self.txs, client, tx, "dispute") else {
+        let Some(stored) = owned_tx(&mut self.deposits, client, tx, "dispute") else {
             return;
         };
         if stored.state != DisputeState::Undisputed {
@@ -101,7 +108,7 @@ impl Ledger {
 
     /// Release previously held funds: held decreases, available increases.
     fn resolve(&mut self, client: ClientId, tx: TxId) {
-        let Some(stored) = owned_tx(&mut self.txs, client, tx, "resolve") else {
+        let Some(stored) = owned_tx(&mut self.deposits, client, tx, "resolve") else {
             return;
         };
         if stored.state != DisputeState::Disputed {
@@ -116,7 +123,7 @@ impl Ledger {
 
     /// Reverse the disputed transaction: held and total decrease, account frozen.
     fn chargeback(&mut self, client: ClientId, tx: TxId) {
-        let Some(stored) = owned_tx(&mut self.txs, client, tx, "chargeback") else {
+        let Some(stored) = owned_tx(&mut self.deposits, client, tx, "chargeback") else {
             return;
         };
         if stored.state != DisputeState::Disputed {
@@ -133,12 +140,12 @@ impl Ledger {
 /// Look up a stored transaction that `client` owns, logging and returning `None`
 /// when it is unknown or belongs to another client (a partner-side error).
 fn owned_tx<'a>(
-    txs: &'a mut HashMap<TxId, StoredTx>,
+    deposits: &'a mut HashMap<TxId, StoredTx>,
     client: ClientId,
     tx: TxId,
     action: &str,
 ) -> Option<&'a mut StoredTx> {
-    match txs.get_mut(&tx) {
+    match deposits.get_mut(&tx) {
         None => {
             log::warn!("{action} references unknown tx {tx} (client {client})");
             None
@@ -185,14 +192,14 @@ mod tests {
         assert_eq!(account.available(), dec("50.0"));
         assert_eq!(account.held(), dec("100.0"));
         assert_eq!(account.total(), dec("150.0"));
-        assert_eq!(ledger.txs[&1].state, DisputeState::Disputed);
+        assert_eq!(ledger.deposits[&1].state, DisputeState::Disputed);
 
         // Resolve tx 1: held funds returned to available.
         ledger.apply(Operation::Resolve { client: 1, tx: 1 });
         let account = ledger.accounts.get(&1).unwrap();
         assert_eq!(account.available(), dec("150.0"));
         assert_eq!(account.held(), dec("0"));
-        assert_eq!(ledger.txs[&1].state, DisputeState::Undisputed);
+        assert_eq!(ledger.deposits[&1].state, DisputeState::Undisputed);
 
         // Dispute then chargeback tx 2: 50 is reversed and the account freezes.
         ledger.apply(Operation::Dispute { client: 1, tx: 2 });
@@ -202,7 +209,7 @@ mod tests {
         assert_eq!(account.held(), dec("0"));
         assert_eq!(account.total(), dec("100.0"));
         assert!(account.locked());
-        assert_eq!(ledger.txs[&2].state, DisputeState::ChargedBack);
+        assert_eq!(ledger.deposits[&2].state, DisputeState::ChargedBack);
     }
 
     /// A charged-back transaction is terminal: re-disputing and charging it back
@@ -275,5 +282,26 @@ mod tests {
         let account = ledger.accounts.get(&1).unwrap();
         assert_eq!(account.available(), dec("10.0"));
         assert_eq!(account.held(), dec("0"));
+    }
+
+    /// A second deposit reusing an existing tx id is ignored, not applied twice.
+    #[test]
+    fn duplicate_deposit_is_ignored() {
+        let mut ledger = Ledger::new();
+
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 1,
+            amount: dec("100.0"),
+        });
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 1,
+            amount: dec("100.0"),
+        });
+
+        let account = ledger.accounts.get(&1).unwrap();
+        assert_eq!(account.available(), dec("100.0"));
+        assert_eq!(account.total(), dec("100.0"));
     }
 }
