@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 
 use crate::account::Account;
 use crate::operation::{ClientId, Operation, TxId};
-use crate::transaction::StoredTx;
+use crate::transaction::{DisputeState, StoredTx};
 
 /// Accumulates account balances as operations are applied.
 #[derive(Debug)]
@@ -78,7 +78,7 @@ impl Ledger {
                 entry.insert(StoredTx {
                     client,
                     amount,
-                    disputed: false,
+                    state: DisputeState::Undisputed,
                 });
             }
         }
@@ -89,11 +89,11 @@ impl Ledger {
         let Some(stored) = owned_tx(&mut self.txs, client, tx, "dispute") else {
             return;
         };
-        if stored.disputed {
-            log::warn!("dispute tx {tx}: already under dispute");
+        if stored.state != DisputeState::Undisputed {
+            log::warn!("dispute tx {tx}: not open for dispute ({:?})", stored.state);
             return;
         }
-        stored.disputed = true;
+        stored.state = DisputeState::Disputed;
         let amount = stored.amount;
         self.account_mut(client).hold(amount);
         log::debug!("dispute tx {tx}: client {client} holds {amount}");
@@ -104,11 +104,11 @@ impl Ledger {
         let Some(stored) = owned_tx(&mut self.txs, client, tx, "resolve") else {
             return;
         };
-        if !stored.disputed {
+        if stored.state != DisputeState::Disputed {
             log::warn!("resolve tx {tx}: not under dispute");
             return;
         }
-        stored.disputed = false;
+        stored.state = DisputeState::Undisputed;
         let amount = stored.amount;
         self.account_mut(client).release(amount);
         log::debug!("resolve tx {tx}: client {client} releases {amount}");
@@ -119,11 +119,11 @@ impl Ledger {
         let Some(stored) = owned_tx(&mut self.txs, client, tx, "chargeback") else {
             return;
         };
-        if !stored.disputed {
+        if stored.state != DisputeState::Disputed {
             log::warn!("chargeback tx {tx}: not under dispute");
             return;
         }
-        stored.disputed = false;
+        stored.state = DisputeState::ChargedBack;
         let amount = stored.amount;
         self.account_mut(client).chargeback(amount);
         log::debug!("chargeback tx {tx}: client {client} reversed {amount}, account frozen");
@@ -185,14 +185,14 @@ mod tests {
         assert_eq!(account.available(), dec("50.0"));
         assert_eq!(account.held(), dec("100.0"));
         assert_eq!(account.total(), dec("150.0"));
-        assert!(ledger.txs[&1].disputed);
+        assert_eq!(ledger.txs[&1].state, DisputeState::Disputed);
 
         // Resolve tx 1: held funds returned to available.
         ledger.apply(Operation::Resolve { client: 1, tx: 1 });
         let account = ledger.accounts.get(&1).unwrap();
         assert_eq!(account.available(), dec("150.0"));
         assert_eq!(account.held(), dec("0"));
-        assert!(!ledger.txs[&1].disputed);
+        assert_eq!(ledger.txs[&1].state, DisputeState::Undisputed);
 
         // Dispute then chargeback tx 2: 50 is reversed and the account freezes.
         ledger.apply(Operation::Dispute { client: 1, tx: 2 });
@@ -202,7 +202,32 @@ mod tests {
         assert_eq!(account.held(), dec("0"));
         assert_eq!(account.total(), dec("100.0"));
         assert!(account.locked());
-        assert!(!ledger.txs[&2].disputed);
+        assert_eq!(ledger.txs[&2].state, DisputeState::ChargedBack);
+    }
+
+    /// A charged-back transaction is terminal: re-disputing and charging it back
+    /// again must be ignored, not double-reverse the funds.
+    #[test]
+    fn cannot_chargeback_twice() {
+        let mut ledger = Ledger::new();
+
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 1,
+            amount: dec("100.0"),
+        });
+        ledger.apply(Operation::Dispute { client: 1, tx: 1 });
+        ledger.apply(Operation::Chargeback { client: 1, tx: 1 });
+
+        // Second dispute + chargeback on the same tx should have no effect.
+        ledger.apply(Operation::Dispute { client: 1, tx: 1 });
+        ledger.apply(Operation::Chargeback { client: 1, tx: 1 });
+
+        let account = ledger.accounts.get(&1).unwrap();
+        assert_eq!(account.available(), dec("0"));
+        assert_eq!(account.held(), dec("0"));
+        assert_eq!(account.total(), dec("0"));
+        assert!(account.locked());
     }
 
     /// Disputes referencing an unknown transaction are ignored.
