@@ -1,0 +1,5 @@
+type, client, tx, amount
+deposit, 1, 1, 1.0
+garbage, 2, 2, 2.0
+deposit, , 4, 5.0
+deposit, 3, 3, 3.0

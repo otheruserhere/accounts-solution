@@ -93,11 +93,19 @@ impl Operation {
     /// Disputes, resolves, and chargebacks are not handled yet.
     pub fn process(&self, accounts: &mut IdOrdMap<Account>) {
         match self {
-            Operation::Deposit { client, amount, .. } => {
+            Operation::Deposit { client, tx, amount } => {
                 account_mut(accounts, *client).deposit(*amount);
+                log::debug!("deposit tx {tx}: client {client} credited {amount}");
             }
-            Operation::Withdrawal { client, amount, .. } => {
-                account_mut(accounts, *client).withdraw(*amount);
+            Operation::Withdrawal { client, tx, amount } => {
+                match account_mut(accounts, *client).withdraw(*amount) {
+                    Ok(()) => {
+                        log::debug!("withdrawal tx {tx}: client {client} debited {amount}");
+                    }
+                    Err(err) => {
+                        log::warn!("withdrawal tx {tx} for client {client} failed: {err}");
+                    }
+                }
             }
             _ => {}
         }

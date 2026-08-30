@@ -1,5 +1,6 @@
 //! A client account and its CSV output row.
 
+use eyre::{Result, bail};
 use iddqd::{IdOrdItem, id_upcast};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -36,11 +37,17 @@ impl Account {
         self.available += amount;
     }
 
-    /// Debit the account, leaving it unchanged if funds are insufficient.
-    pub fn withdraw(&mut self, amount: Decimal) {
-        if self.available >= amount {
-            self.available -= amount;
+    /// Debit the account, leaving it unchanged and erroring when the available
+    /// funds are insufficient.
+    pub fn withdraw(&mut self, amount: Decimal) -> Result<()> {
+        if self.available < amount {
+            bail!(
+                "insufficient funds: available {}, requested {amount}",
+                self.available
+            );
         }
+        self.available -= amount;
+        Ok(())
     }
 }
 
@@ -133,7 +140,7 @@ mod tests {
     fn deposit_then_withdraw() {
         let mut account = Account::new(1);
         account.deposit(dec("3.0"));
-        account.withdraw(dec("1.5"));
+        assert!(account.withdraw(dec("1.5")).is_ok());
         assert_eq!(account.available, dec("1.5"));
         assert_eq!(account.total(), dec("1.5"));
     }
@@ -142,7 +149,7 @@ mod tests {
     fn withdraw_with_insufficient_funds_is_ignored() {
         let mut account = Account::new(1);
         account.deposit(dec("2.0"));
-        account.withdraw(dec("3.0"));
+        assert!(account.withdraw(dec("3.0")).is_err());
         assert_eq!(account.available, dec("2.0"));
     }
 }
