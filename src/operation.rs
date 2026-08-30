@@ -1,5 +1,8 @@
 //! Parsing of a CSV transaction row into a typed [`Operation`].
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
 use eyre::{Result, bail, eyre};
 use iddqd::IdOrdMap;
 use iddqd::id_ord_map::RefMut;
@@ -7,6 +10,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use crate::account::Account;
+use crate::transaction::StoredTx;
 
 pub type ClientId = u16;
 pub type TxId = u32;
@@ -35,7 +39,6 @@ pub struct Record {
 }
 
 /// A single transaction read from the input CSV.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
     /// Credit to a client's account: increases available and total funds.
@@ -88,18 +91,21 @@ impl TryFrom<Record> for Operation {
 }
 
 impl Operation {
-    /// Apply this operation to the account map, creating the account if needed.
+    /// Apply this operation to the account map, recording deposits and
+    /// withdrawals in the transaction store and creating records as needed.
     ///
     /// Disputes, resolves, and chargebacks are not handled yet.
-    pub fn process(&self, accounts: &mut IdOrdMap<Account>) {
+    pub fn process(&self, accounts: &mut IdOrdMap<Account>, txs: &mut HashMap<TxId, StoredTx>) {
         match self {
             Operation::Deposit { client, tx, amount } => {
                 account_mut(accounts, *client).deposit(*amount);
+                record_tx(txs, *client, *tx, *amount);
                 log::debug!("deposit tx {tx}: client {client} credited {amount}");
             }
             Operation::Withdrawal { client, tx, amount } => {
                 match account_mut(accounts, *client).withdraw(*amount) {
                     Ok(()) => {
+                        record_tx(txs, *client, *tx, *amount);
                         log::debug!("withdrawal tx {tx}: client {client} debited {amount}");
                     }
                     Err(err) => {
@@ -108,6 +114,16 @@ impl Operation {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Append a processed transaction to the store, keyed by its globally unique id.
+fn record_tx(txs: &mut HashMap<TxId, StoredTx>, client: ClientId, tx: TxId, amount: Decimal) {
+    match txs.entry(tx) {
+        Entry::Occupied(_) => log::warn!("duplicate transaction id {tx} for client {client}"),
+        Entry::Vacant(entry) => {
+            entry.insert(StoredTx { client, amount });
         }
     }
 }
