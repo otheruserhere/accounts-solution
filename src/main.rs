@@ -1,3 +1,5 @@
+mod operation;
+
 use std::io::{self, Write};
 use std::process::ExitCode;
 
