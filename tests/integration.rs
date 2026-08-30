@@ -3,9 +3,10 @@ use std::process::Command;
 /// End-to-end check: the engine processes the sample transactions and writes the
 /// resulting account balances to stdout, ordered by client id.
 ///
-/// Only deposits and withdrawals are applied so far; the dispute, resolve, and
-/// chargeback rows in the fixture are no-ops. Client 2's `3.0` withdrawal fails
-/// for insufficient funds, leaving its balance at the `2.0` deposited.
+/// Client 1's dispute and resolve on tx 1 net out, leaving its deposits and one
+/// successful withdrawal. Client 2 deposits 2.0 (its 3.0 withdrawal fails), then
+/// that deposit is disputed and charged back, zeroing the balance and locking
+/// the account.
 #[test]
 fn outputs_account_balances() {
     let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/sample.csv");
@@ -19,7 +20,7 @@ fn outputs_account_balances() {
 
     let expected = "client,available,held,total,locked\n\
                     1,6.6234,0,6.6234,false\n\
-                    2,2,0,2,false\n";
+                    2,0,0,0,true\n";
     assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
 }
 

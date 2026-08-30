@@ -27,6 +27,18 @@ impl Account {
         }
     }
 
+    pub fn available(&self) -> Decimal {
+        self.available
+    }
+
+    pub fn held(&self) -> Decimal {
+        self.held
+    }
+
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
     /// Available funds plus funds held for dispute.
     pub fn total(&self) -> Decimal {
         self.available + self.held
@@ -48,6 +60,25 @@ impl Account {
         }
         self.available -= amount;
         Ok(())
+    }
+
+    /// Hold funds under dispute: move `amount` from available to held.
+    pub fn hold(&mut self, amount: Decimal) {
+        self.available -= amount;
+        self.held += amount;
+    }
+
+    /// Release held funds on resolve: move `amount` from held back to available.
+    pub fn release(&mut self, amount: Decimal) {
+        self.held -= amount;
+        self.available += amount;
+    }
+
+    /// Reverse a disputed transaction: remove `amount` from held (and total) and
+    /// freeze the account.
+    pub fn chargeback(&mut self, amount: Decimal) {
+        self.held -= amount;
+        self.locked = true;
     }
 }
 
@@ -75,10 +106,10 @@ impl From<&Account> for Record {
     fn from(account: &Account) -> Self {
         Self {
             client: account.client_id,
-            available: account.available,
-            held: account.held,
+            available: account.available(),
+            held: account.held(),
             total: account.total(),
-            locked: account.locked,
+            locked: account.locked(),
         }
     }
 }
