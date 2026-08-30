@@ -28,7 +28,14 @@ impl Ledger {
     }
 
     /// Apply one operation, mutating account balances and the deposit store.
+    ///
+    /// A frozen account rejects every operation, so a locked account's state is
+    /// final.
     pub fn apply(&mut self, op: Operation) {
+        if self.is_locked(op.client()) {
+            log::warn!("account {} is locked; ignoring {op:?}", op.client());
+            return;
+        }
         match op {
             Operation::Deposit { client, tx, amount } => {
                 if self.record_deposit(client, tx, amount) {
@@ -56,6 +63,11 @@ impl Ledger {
     /// Accounts in client-id order, for producing the resulting CSV.
     pub fn accounts(&self) -> impl Iterator<Item = &Account> {
         self.accounts.iter()
+    }
+
+    /// Whether the client's account exists and is frozen.
+    fn is_locked(&self, client: ClientId) -> bool {
+        self.accounts.get(&client).is_some_and(Account::locked)
     }
 
     /// Get the account for `client`, inserting a fresh one if it does not exist.
@@ -282,6 +294,32 @@ mod tests {
         let account = ledger.accounts.get(&1).unwrap();
         assert_eq!(account.available(), dec("10.0"));
         assert_eq!(account.held(), dec("0"));
+    }
+
+    /// A frozen account rejects every operation, including deposits.
+    #[test]
+    fn locked_account_ignores_all_operations() {
+        let mut ledger = Ledger::new();
+
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 1,
+            amount: dec("100.0"),
+        });
+        ledger.apply(Operation::Dispute { client: 1, tx: 1 });
+        ledger.apply(Operation::Chargeback { client: 1, tx: 1 });
+
+        // The account is now frozen; a further deposit must be ignored.
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 2,
+            amount: dec("50.0"),
+        });
+
+        let account = ledger.accounts.get(&1).unwrap();
+        assert!(account.locked());
+        assert_eq!(account.available(), dec("0"));
+        assert_eq!(account.total(), dec("0"));
     }
 
     /// A second deposit reusing an existing tx id is ignored, not applied twice.

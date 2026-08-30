@@ -49,12 +49,9 @@ impl Account {
         self.available += amount;
     }
 
-    /// Debit the account, leaving it unchanged and erroring when it is locked or
-    /// the available funds are insufficient.
+    /// Debit the account, leaving it unchanged and erroring when the available
+    /// funds are insufficient.
     pub fn withdraw(&mut self, amount: Decimal) -> Result<()> {
-        if self.locked {
-            bail!("account is locked");
-        }
         if self.available < amount {
             bail!(
                 "insufficient funds: available {}, requested {amount}",

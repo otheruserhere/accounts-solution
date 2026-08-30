@@ -53,6 +53,19 @@ pub enum Operation {
     Chargeback { client: ClientId, tx: TxId },
 }
 
+impl Operation {
+    /// The client this operation acts on.
+    pub fn client(&self) -> ClientId {
+        match self {
+            Operation::Deposit { client, .. }
+            | Operation::Withdrawal { client, .. }
+            | Operation::Dispute { client, .. }
+            | Operation::Resolve { client, .. }
+            | Operation::Chargeback { client, .. } => *client,
+        }
+    }
+}
+
 impl TryFrom<Record> for Operation {
     type Error = eyre::Report;
 
