@@ -1,0 +1,224 @@
+//! The engine state: client accounts and the transaction store, mutated by
+//! applying [`Operation`]s.
+
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
+use iddqd::IdOrdMap;
+use iddqd::id_ord_map::RefMut;
+use rust_decimal::Decimal;
+
+use crate::account::Account;
+use crate::operation::{ClientId, Operation, TxId};
+use crate::transaction::StoredTx;
+
+/// Accumulates account balances as operations are applied.
+#[derive(Debug)]
+pub struct Ledger {
+    accounts: IdOrdMap<Account>,
+    txs: HashMap<TxId, StoredTx>,
+}
+
+impl Ledger {
+    pub fn new() -> Self {
+        Self {
+            accounts: IdOrdMap::new(),
+            txs: HashMap::new(),
+        }
+    }
+
+    /// Apply one operation, mutating account balances and the transaction store.
+    pub fn apply(&mut self, op: Operation) {
+        match op {
+            Operation::Deposit { client, tx, amount } => {
+                self.account_mut(client).deposit(amount);
+                self.record_tx(client, tx, amount);
+                log::debug!("deposit tx {tx}: client {client} credited {amount}");
+            }
+            Operation::Withdrawal { client, tx, amount } => {
+                let result = self.account_mut(client).withdraw(amount);
+                match result {
+                    Ok(()) => {
+                        self.record_tx(client, tx, amount);
+                        log::debug!("withdrawal tx {tx}: client {client} debited {amount}");
+                    }
+                    Err(err) => {
+                        log::warn!("withdrawal tx {tx} for client {client} failed: {err}");
+                    }
+                }
+            }
+            Operation::Dispute { client, tx } => self.dispute(client, tx),
+            Operation::Resolve { client, tx } => self.resolve(client, tx),
+            Operation::Chargeback { client, tx } => self.chargeback(client, tx),
+        }
+    }
+
+    /// Accounts in client-id order, for producing the resulting CSV.
+    pub fn accounts(&self) -> impl Iterator<Item = &Account> {
+        self.accounts.iter()
+    }
+
+    /// Get the account for `client`, inserting a fresh one if it does not exist.
+    fn account_mut(&mut self, client: ClientId) -> RefMut<'_, Account> {
+        if self.accounts.get(&client).is_none() {
+            self.accounts
+                .insert_unique(Account::new(client))
+                .expect("account is absent");
+        }
+        self.accounts
+            .get_mut(&client)
+            .expect("account was just inserted")
+    }
+
+    /// Append a processed transaction, keyed by its globally unique id.
+    fn record_tx(&mut self, client: ClientId, tx: TxId, amount: Decimal) {
+        match self.txs.entry(tx) {
+            Entry::Occupied(_) => log::warn!("duplicate transaction id {tx} for client {client}"),
+            Entry::Vacant(entry) => {
+                entry.insert(StoredTx {
+                    client,
+                    amount,
+                    disputed: false,
+                });
+            }
+        }
+    }
+
+    /// Hold the disputed funds: available decreases, held increases, total same.
+    fn dispute(&mut self, client: ClientId, tx: TxId) {
+        let Some(stored) = owned_tx(&mut self.txs, client, tx, "dispute") else {
+            return;
+        };
+        if stored.disputed {
+            log::warn!("dispute tx {tx}: already under dispute");
+            return;
+        }
+        stored.disputed = true;
+        let amount = stored.amount;
+        self.account_mut(client).hold(amount);
+        log::debug!("dispute tx {tx}: client {client} holds {amount}");
+    }
+
+    /// Release previously held funds: held decreases, available increases.
+    fn resolve(&mut self, client: ClientId, tx: TxId) {
+        let Some(stored) = owned_tx(&mut self.txs, client, tx, "resolve") else {
+            return;
+        };
+        if !stored.disputed {
+            log::warn!("resolve tx {tx}: not under dispute");
+            return;
+        }
+        stored.disputed = false;
+        let amount = stored.amount;
+        self.account_mut(client).release(amount);
+        log::debug!("resolve tx {tx}: client {client} releases {amount}");
+    }
+
+    /// Reverse the disputed transaction: held and total decrease, account frozen.
+    fn chargeback(&mut self, client: ClientId, tx: TxId) {
+        let Some(stored) = owned_tx(&mut self.txs, client, tx, "chargeback") else {
+            return;
+        };
+        if !stored.disputed {
+            log::warn!("chargeback tx {tx}: not under dispute");
+            return;
+        }
+        stored.disputed = false;
+        let amount = stored.amount;
+        self.account_mut(client).chargeback(amount);
+        log::debug!("chargeback tx {tx}: client {client} reversed {amount}, account frozen");
+    }
+}
+
+/// Look up a stored transaction that `client` owns, logging and returning `None`
+/// when it is unknown or belongs to another client (a partner-side error).
+fn owned_tx<'a>(
+    txs: &'a mut HashMap<TxId, StoredTx>,
+    client: ClientId,
+    tx: TxId,
+    action: &str,
+) -> Option<&'a mut StoredTx> {
+    match txs.get_mut(&tx) {
+        None => {
+            log::warn!("{action} references unknown tx {tx} (client {client})");
+            None
+        }
+        Some(stored) if stored.client != client => {
+            log::warn!("{action} tx {tx}: not owned by client {client}");
+            None
+        }
+        Some(stored) => Some(stored),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal::prelude::*;
+
+    fn dec(s: &str) -> Decimal {
+        Decimal::from_str(s).unwrap()
+    }
+
+    /// Drive a full dispute lifecycle and assert both the account balances and
+    /// the transaction store after each phase: dispute and resolve on tx 1, then
+    /// dispute and chargeback on tx 2.
+    #[test]
+    fn dispute_resolve_and_chargeback() {
+        let mut ledger = Ledger::new();
+
+        // Two deposits: available 150, held 0.
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 1,
+            amount: dec("100.0"),
+        });
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 2,
+            amount: dec("50.0"),
+        });
+
+        // Dispute tx 1: available 50, held 100, total unchanged at 150.
+        ledger.apply(Operation::Dispute { client: 1, tx: 1 });
+        let account = ledger.accounts.get(&1).unwrap();
+        assert_eq!(account.available(), dec("50.0"));
+        assert_eq!(account.held(), dec("100.0"));
+        assert_eq!(account.total(), dec("150.0"));
+        assert!(ledger.txs[&1].disputed);
+
+        // Resolve tx 1: held funds returned to available.
+        ledger.apply(Operation::Resolve { client: 1, tx: 1 });
+        let account = ledger.accounts.get(&1).unwrap();
+        assert_eq!(account.available(), dec("150.0"));
+        assert_eq!(account.held(), dec("0"));
+        assert!(!ledger.txs[&1].disputed);
+
+        // Dispute then chargeback tx 2: 50 is reversed and the account freezes.
+        ledger.apply(Operation::Dispute { client: 1, tx: 2 });
+        ledger.apply(Operation::Chargeback { client: 1, tx: 2 });
+        let account = ledger.accounts.get(&1).unwrap();
+        assert_eq!(account.available(), dec("100.0"));
+        assert_eq!(account.held(), dec("0"));
+        assert_eq!(account.total(), dec("100.0"));
+        assert!(account.locked());
+        assert!(!ledger.txs[&2].disputed);
+    }
+
+    /// Disputes referencing an unknown transaction are ignored.
+    #[test]
+    fn dispute_of_unknown_tx_is_ignored() {
+        let mut ledger = Ledger::new();
+
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 1,
+            amount: dec("10.0"),
+        });
+        ledger.apply(Operation::Dispute { client: 1, tx: 99 });
+
+        let account = ledger.accounts.get(&1).unwrap();
+        assert_eq!(account.available(), dec("10.0"));
+        assert_eq!(account.held(), dec("0"));
+    }
+}

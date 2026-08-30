@@ -1,17 +1,16 @@
 mod account;
+mod ledger;
 mod operation;
 mod transaction;
 
-use std::collections::HashMap;
 use std::io;
 use std::process::ExitCode;
 
 use eyre::{Result, WrapErr, eyre};
-use iddqd::IdOrdMap;
 
-use account::{Account, Record as AccountRecord};
-use operation::{Operation, Record as InputRecord, TxId};
-use transaction::StoredTx;
+use account::Record as AccountRecord;
+use ledger::Ledger;
+use operation::{Operation, Record as InputRecord};
 
 fn main() -> ExitCode {
     env_logger::init();
@@ -31,34 +30,35 @@ fn run() -> Result<()> {
 
     log::info!("processing transactions from {}", path.to_string_lossy());
 
+    // Stream one record at a time rather than loading the whole file.
     let mut reader = csv::ReaderBuilder::new()
         .trim(csv::Trim::All)
         .flexible(true)
         .from_path(&path)
         .wrap_err_with(|| format!("failed to open {}", path.to_string_lossy()))?;
 
-    let mut accounts = IdOrdMap::<Account>::new();
-    let mut txs = HashMap::<TxId, StoredTx>::new();
+    // A malformed row is logged and skipped so the rest of the file still runs.
+    let mut ledger = Ledger::new();
     for result in reader.deserialize() {
         let operation = result
             .map_err(eyre::Report::from)
             .and_then(|record: InputRecord| Operation::try_from(record));
         match operation {
-            Ok(operation) => operation.process(&mut accounts, &mut txs),
+            Ok(operation) => ledger.apply(operation),
             Err(err) => log::error!("failed to parse row: {err}"),
         }
     }
 
-    dbg!(&txs);
-
     let mut writer = csv::Writer::from_writer(io::stdout().lock());
-    for account in &accounts {
+    let mut count = 0;
+    for account in ledger.accounts() {
         writer
             .serialize(AccountRecord::from(account))
             .wrap_err("failed to write account")?;
+        count += 1;
     }
     writer.flush().wrap_err("failed to flush output")?;
 
-    log::info!("wrote {} accounts", accounts.len());
+    log::info!("wrote {count} accounts");
     Ok(())
 }
