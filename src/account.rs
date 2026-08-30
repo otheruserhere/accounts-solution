@@ -1,6 +1,6 @@
 //! A client account and its CSV output row.
 
-use eyre::{Result, bail};
+use eyre::{Result, bail, eyre};
 use iddqd::{IdOrdItem, id_upcast};
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -44,15 +44,16 @@ impl Account {
         self.available + self.held
     }
 
-    /// Credit the account, erroring if the available balance would overflow.
+    /// Credit the account, erroring if the total balance would overflow.
+    ///
+    /// `total` is the ceiling to guard, not `available`: held funds can keep
+    /// `available` small while `total` sits near the max representable value.
     pub fn deposit(&mut self, amount: Decimal) -> Result<()> {
-        match self.available.checked_add(amount) {
-            Some(available) => {
-                self.available = available;
-                Ok(())
-            }
-            None => bail!("deposit would overflow the available balance"),
+        if self.total().checked_add(amount).is_none() {
+            bail!("deposit would overflow the balance");
         }
+        self.available += amount;
+        Ok(())
     }
 
     /// Debit the account, leaving it unchanged and erroring when the available
@@ -68,10 +69,20 @@ impl Account {
         Ok(())
     }
 
-    /// Hold funds under dispute: move `amount` from available to held.
-    pub fn hold(&mut self, amount: Decimal) {
-        self.available -= amount;
-        self.held += amount;
+    /// Hold funds under dispute: move `amount` from available to held. Errors,
+    /// leaving the account unchanged, if either balance would overflow.
+    pub fn hold(&mut self, amount: Decimal) -> Result<()> {
+        let available = self
+            .available
+            .checked_sub(amount)
+            .ok_or_else(|| eyre!("dispute would overflow the balance"))?;
+        let held = self
+            .held
+            .checked_add(amount)
+            .ok_or_else(|| eyre!("dispute would overflow the balance"))?;
+        self.available = available;
+        self.held = held;
+        Ok(())
     }
 
     /// Release held funds on resolve: move `amount` from held back to available.

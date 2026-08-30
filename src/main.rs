@@ -49,7 +49,14 @@ fn run() -> Result<()> {
         }
     }
 
-    let mut writer = csv::Writer::from_writer(io::stdout().lock());
+    // Write the header explicitly so it is present even with no accounts.
+    let mut writer = csv::WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(io::stdout().lock());
+    writer
+        .write_record(["client", "available", "held", "total", "locked"])
+        .wrap_err("failed to write header")?;
+
     let mut count = 0;
     for account in ledger.accounts() {
         writer

@@ -112,10 +112,18 @@ impl Ledger {
             log::warn!("dispute tx {tx}: not open for dispute ({:?})", stored.state);
             return;
         }
-        stored.state = DisputeState::Disputed;
         let amount = stored.amount;
-        self.account_mut(client).hold(amount);
-        log::debug!("dispute tx {tx}: client {client} holds {amount}");
+        let result = self.account_mut(client).hold(amount);
+        match result {
+            Ok(()) => {
+                self.deposits
+                    .get_mut(&tx)
+                    .expect("deposit was just looked up")
+                    .state = DisputeState::Disputed;
+                log::debug!("dispute tx {tx}: client {client} holds {amount}");
+            }
+            Err(err) => log::warn!("dispute tx {tx} for client {client} failed: {err}"),
+        }
     }
 
     /// Release previously held funds: held decreases, available increases.
@@ -362,5 +370,38 @@ mod tests {
         let account = ledger.accounts.get(&1).unwrap();
         assert_eq!(account.available(), Decimal::MAX);
         assert_eq!(account.total(), Decimal::MAX);
+    }
+
+    /// A dispute whose held funds would overflow is ignored, not panicking.
+    ///
+    /// A withdrawal between two max deposits lets the second deposit be credited
+    /// (total returns to zero first), so disputing both would push `held` past
+    /// the max representable value.
+    #[test]
+    fn dispute_overflow_is_ignored() {
+        let mut ledger = Ledger::new();
+
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 1,
+            amount: Decimal::MAX,
+        });
+        ledger.apply(Operation::Withdrawal {
+            client: 1,
+            tx: 2,
+            amount: Decimal::MAX,
+        });
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 3,
+            amount: Decimal::MAX,
+        });
+        ledger.apply(Operation::Dispute { client: 1, tx: 1 });
+        ledger.apply(Operation::Dispute { client: 1, tx: 3 });
+
+        // The second dispute is rejected; the first still holds its funds.
+        let account = ledger.accounts.get(&1).unwrap();
+        assert_eq!(account.held(), Decimal::MAX);
+        assert_eq!(ledger.deposits[&3].state, DisputeState::Undisputed);
     }
 }

@@ -43,3 +43,20 @@ fn malformed_row_does_not_abort_processing() {
                     3,3,0,3,false\n";
     assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
 }
+
+/// A header-only input yields output that is just the header row.
+#[test]
+fn empty_input_outputs_header_only() {
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/empty.csv");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_accounts-solution"))
+        .arg(fixture)
+        .output()
+        .expect("run binary");
+
+    assert!(output.status.success(), "binary exited with failure");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "client,available,held,total,locked\n"
+    );
+}
