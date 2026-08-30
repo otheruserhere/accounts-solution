@@ -83,25 +83,6 @@ impl TryFrom<Record> for Operation {
     }
 }
 
-impl Operation {
-    /// Parse a single CSV row into an [`Operation`], tolerating surrounding
-    /// whitespace and an empty or absent amount column.
-    pub fn parse(line: &str) -> Result<Operation> {
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(false)
-            .flexible(true)
-            .trim(csv::Trim::All)
-            .from_reader(line.as_bytes());
-
-        let record: Record = reader
-            .deserialize()
-            .next()
-            .ok_or_else(|| eyre!("no record found in line: {line:?}"))??;
-
-        Operation::try_from(record)
-    }
-}
-
 /// Validate that a deposit/withdrawal amount is present and non-negative.
 fn require_amount(amount: Option<Decimal>) -> Result<Decimal> {
     let amount = amount.ok_or_else(|| eyre!("missing amount"))?;
@@ -120,10 +101,27 @@ mod tests {
         Decimal::from_str(s).unwrap()
     }
 
+    /// Deserialize one CSV row through serde and convert it, mirroring how the
+    /// engine reads records but for a single line in isolation.
+    fn deserialize(line: &str) -> Result<Operation> {
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .flexible(true)
+            .trim(csv::Trim::All)
+            .from_reader(line.as_bytes());
+
+        let record: Record = reader
+            .deserialize()
+            .next()
+            .ok_or_else(|| eyre!("no record found in line: {line:?}"))??;
+
+        Operation::try_from(record)
+    }
+
     #[test]
     fn parses_deposit() {
         assert_eq!(
-            Operation::parse("deposit, 1, 1, 1.0").unwrap(),
+            deserialize("deposit, 1, 1, 1.0").unwrap(),
             Operation::Deposit {
                 client: 1,
                 tx: 1,
@@ -135,7 +133,7 @@ mod tests {
     #[test]
     fn parses_withdrawal() {
         assert_eq!(
-            Operation::parse("withdrawal, 2, 5, 3.0").unwrap(),
+            deserialize("withdrawal, 2, 5, 3.0").unwrap(),
             Operation::Withdrawal {
                 client: 2,
                 tx: 5,
@@ -147,7 +145,7 @@ mod tests {
     #[test]
     fn parses_four_decimal_precision() {
         assert_eq!(
-            Operation::parse("deposit, 1, 6, 5.1234").unwrap(),
+            deserialize("deposit, 1, 6, 5.1234").unwrap(),
             Operation::Deposit {
                 client: 1,
                 tx: 6,
@@ -159,41 +157,41 @@ mod tests {
     #[test]
     fn parses_dispute_resolve_chargeback_without_amount() {
         assert_eq!(
-            Operation::parse("dispute, 1, 1,").unwrap(),
+            deserialize("dispute, 1, 1,").unwrap(),
             Operation::Dispute { client: 1, tx: 1 }
         );
         assert_eq!(
-            Operation::parse("resolve, 1, 1").unwrap(),
+            deserialize("resolve, 1, 1").unwrap(),
             Operation::Resolve { client: 1, tx: 1 }
         );
         assert_eq!(
-            Operation::parse("chargeback, 2, 2,").unwrap(),
+            deserialize("chargeback, 2, 2,").unwrap(),
             Operation::Chargeback { client: 2, tx: 2 }
         );
     }
 
     #[test]
     fn errors_on_unknown_type() {
-        assert!(Operation::parse("teleport, 1, 1, 1.0").is_err());
+        assert!(deserialize("teleport, 1, 1, 1.0").is_err());
     }
 
     #[test]
     fn errors_on_missing_amount_for_deposit() {
-        assert!(Operation::parse("deposit, 1, 1,").is_err());
+        assert!(deserialize("deposit, 1, 1,").is_err());
     }
 
     #[test]
     fn errors_on_non_numeric_amount() {
-        assert!(Operation::parse("deposit, 1, 1, abc").is_err());
+        assert!(deserialize("deposit, 1, 1, abc").is_err());
     }
 
     #[test]
     fn errors_on_negative_amount() {
-        assert!(Operation::parse("deposit, 1, 1, -1.0").is_err());
+        assert!(deserialize("deposit, 1, 1, -1.0").is_err());
     }
 
     #[test]
     fn errors_on_invalid_client() {
-        assert!(Operation::parse("deposit, 99999999, 1, 1.0").is_err());
+        assert!(deserialize("deposit, 99999999, 1, 1.0").is_err());
     }
 }
