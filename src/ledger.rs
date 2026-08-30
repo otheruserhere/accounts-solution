@@ -230,6 +230,36 @@ mod tests {
         assert!(account.locked());
     }
 
+    /// A locked account rejects further withdrawals, leaving its balance intact.
+    #[test]
+    fn locked_account_cannot_withdraw() {
+        let mut ledger = Ledger::new();
+
+        // Deposit 150, then chargeback tx 1 (100) to lock the account with 50 left.
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 1,
+            amount: dec("100.0"),
+        });
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 2,
+            amount: dec("50.0"),
+        });
+        ledger.apply(Operation::Dispute { client: 1, tx: 1 });
+        ledger.apply(Operation::Chargeback { client: 1, tx: 1 });
+
+        ledger.apply(Operation::Withdrawal {
+            client: 1,
+            tx: 3,
+            amount: dec("20.0"),
+        });
+
+        let account = ledger.accounts.get(&1).unwrap();
+        assert!(account.locked());
+        assert_eq!(account.available(), dec("50.0"));
+    }
+
     /// Disputes referencing an unknown transaction are ignored.
     #[test]
     fn dispute_of_unknown_tx_is_ignored() {
