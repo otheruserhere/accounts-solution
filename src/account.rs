@@ -44,9 +44,15 @@ impl Account {
         self.available + self.held
     }
 
-    /// Credit the account, increasing available (and total) funds.
-    pub fn deposit(&mut self, amount: Decimal) {
-        self.available += amount;
+    /// Credit the account, erroring if the available balance would overflow.
+    pub fn deposit(&mut self, amount: Decimal) -> Result<()> {
+        match self.available.checked_add(amount) {
+            Some(available) => {
+                self.available = available;
+                Ok(())
+            }
+            None => bail!("deposit would overflow the available balance"),
+        }
     }
 
     /// Debit the account, leaving it unchanged and erroring when the available
@@ -170,7 +176,7 @@ mod tests {
     #[test]
     fn deposit_then_withdraw() {
         let mut account = Account::new(1);
-        account.deposit(dec("3.0"));
+        account.deposit(dec("3.0")).unwrap();
         assert!(account.withdraw(dec("1.5")).is_ok());
         assert_eq!(account.available, dec("1.5"));
         assert_eq!(account.total(), dec("1.5"));
@@ -179,7 +185,7 @@ mod tests {
     #[test]
     fn withdraw_with_insufficient_funds_is_ignored() {
         let mut account = Account::new(1);
-        account.deposit(dec("2.0"));
+        account.deposit(dec("2.0")).unwrap();
         assert!(account.withdraw(dec("3.0")).is_err());
         assert_eq!(account.available, dec("2.0"));
     }

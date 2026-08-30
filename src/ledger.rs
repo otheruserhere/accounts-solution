@@ -2,7 +2,6 @@
 //! [`Operation`]s.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 
 use iddqd::IdOrdMap;
 use iddqd::id_ord_map::RefMut;
@@ -38,9 +37,19 @@ impl Ledger {
         }
         match op {
             Operation::Deposit { client, tx, amount } => {
-                if self.record_deposit(client, tx, amount) {
-                    self.account_mut(client).deposit(amount);
-                    log::debug!("deposit tx {tx}: client {client} credited {amount}");
+                if self.deposits.contains_key(&tx) {
+                    log::warn!("duplicate transaction id {tx} for client {client}");
+                    return;
+                }
+                let result = self.account_mut(client).deposit(amount);
+                match result {
+                    Ok(()) => {
+                        self.record_deposit(client, tx, amount);
+                        log::debug!("deposit tx {tx}: client {client} credited {amount}");
+                    }
+                    Err(err) => {
+                        log::warn!("deposit tx {tx} for client {client} failed: {err}");
+                    }
                 }
             }
             Operation::Withdrawal { client, tx, amount } => {
@@ -82,25 +91,16 @@ impl Ledger {
             .expect("account was just inserted")
     }
 
-    /// Record a deposit for later dispute handling, keyed by its unique tx id.
-    ///
-    /// Returns `false` if the tx id was already seen, so the caller skips
-    /// re-applying a duplicate deposit to the balance.
-    fn record_deposit(&mut self, client: ClientId, tx: TxId, amount: Decimal) -> bool {
-        match self.deposits.entry(tx) {
-            Entry::Occupied(_) => {
-                log::warn!("duplicate transaction id {tx} for client {client}");
-                false
-            }
-            Entry::Vacant(entry) => {
-                entry.insert(StoredTx {
-                    client,
-                    amount,
-                    state: DisputeState::Undisputed,
-                });
-                true
-            }
-        }
+    /// Record a credited deposit, keyed by its unique tx id, for dispute handling.
+    fn record_deposit(&mut self, client: ClientId, tx: TxId, amount: Decimal) {
+        self.deposits.insert(
+            tx,
+            StoredTx {
+                client,
+                amount,
+                state: DisputeState::Undisputed,
+            },
+        );
     }
 
     /// Hold the disputed funds: available decreases, held increases, total same.
@@ -341,5 +341,26 @@ mod tests {
         let account = ledger.accounts.get(&1).unwrap();
         assert_eq!(account.available(), dec("100.0"));
         assert_eq!(account.total(), dec("100.0"));
+    }
+
+    /// A deposit that would overflow the balance is ignored, not panicking.
+    #[test]
+    fn deposit_overflow_is_ignored() {
+        let mut ledger = Ledger::new();
+
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 1,
+            amount: Decimal::MAX,
+        });
+        ledger.apply(Operation::Deposit {
+            client: 1,
+            tx: 2,
+            amount: Decimal::MAX,
+        });
+
+        let account = ledger.accounts.get(&1).unwrap();
+        assert_eq!(account.available(), Decimal::MAX);
+        assert_eq!(account.total(), Decimal::MAX);
     }
 }
